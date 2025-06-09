@@ -1,6 +1,6 @@
-import { exists } from "https://deno.land/std/fs/exists.ts"; // Import exists function
+import { exists } from "https://deno.land/std/fs/exists.ts";
 
-// --- Utility Functions (Moved to the top to ensure they are defined before first use) ---
+// --- Utility Functions (Ensure these are at the top) ---
 
 /**
  * This is not real UUID validation, but it's used for comparison.
@@ -84,80 +84,84 @@ function base64ToArrayBuffer(base64Str: string) {
 
 // --- Configuration and UUID Management ---
 
-const envUUID = Deno.env.get('UUID') || 'e5185305-1984-4084-81e0-f77271159c62';
 const proxyIP = Deno.env.get('PROXYIP') || '';
 const credit = Deno.env.get('CREDIT') || 'DenoBy-ModsBots';
 
 const CONFIG_FILE = 'config.json';
 
 interface Config {
-  uuid?: string;
+  uuids?: string[]; // Change to an array of UUIDs
 }
 
+// Global variable to hold allowed UUIDs
+let allowedUserIDs: Set<string> = new Set();
+
 /**
- * Reads the UUID from the config.json file.
- * @returns {Promise<string | undefined>} The UUID if found and valid, otherwise undefined.
+ * Loads UUIDs from the config.json file.
+ * @returns {Promise<void>}
  */
-async function getUUIDFromConfig(): Promise<string | undefined> {
+async function loadUUIDsFromConfig(): Promise<void> {
   if (await exists(CONFIG_FILE)) {
     try {
       const configText = await Deno.readTextFile(CONFIG_FILE);
       const config: Config = JSON.parse(configText);
-      if (config.uuid && isValidUUID(config.uuid)) {
-        console.log(`Loaded UUID from ${CONFIG_FILE}: ${config.uuid}`);
-        return config.uuid;
+      if (config.uuids && Array.isArray(config.uuids)) {
+        allowedUserIDs.clear(); // Clear existing
+        for (const uuid of config.uuids) {
+          if (isValidUUID(uuid)) {
+            allowedUserIDs.add(uuid);
+            console.log(`Loaded UUID from ${CONFIG_FILE}: ${uuid}`);
+          } else {
+            console.warn(`Invalid UUID found in config.json: ${uuid}`);
+          }
+        }
       }
     } catch (e) {
       console.warn(`Error reading or parsing ${CONFIG_FILE}:`, e.message);
     }
   }
-  return undefined;
+  // If no UUIDs loaded from config, ensure at least one is present
+  if (allowedUserIDs.size === 0) {
+    const defaultUUID = Deno.env.get('UUID') || crypto.randomUUID();
+    if (isValidUUID(defaultUUID)) {
+        allowedUserIDs.add(defaultUUID);
+        console.log(`No valid UUIDs in config, using default/generated: ${defaultUUID}`);
+        // Optionally save the default UUID to config
+        await saveUUIDsToConfig(Array.from(allowedUserIDs));
+    } else {
+        throw new Error('No valid UUIDs found in config or environment for initial setup.');
+    }
+  }
 }
 
 /**
- * Saves the given UUID to the config.json file.
- * @param {string} uuid The UUID to save.
+ * Saves the given UUIDs to the config.json file.
+ * @param {string[]} uuids The UUIDs to save.
  */
-async function saveUUIDToConfig(uuid: string): Promise<void> {
+async function saveUUIDsToConfig(uuids: string[]): Promise<void> {
   try {
-    const config: Config = { uuid: uuid };
+    const config: Config = { uuids: uuids };
     await Deno.writeTextFile(CONFIG_FILE, JSON.stringify(config, null, 2));
-    console.log(`Saved new UUID to ${CONFIG_FILE}: ${uuid}`);
+    console.log(`Saved UUIDs to ${CONFIG_FILE}`);
   } catch (e) {
-    console.error(`Failed to save UUID to ${CONFIG_FILE}:`, e.message);
+    console.error(`Failed to save UUIDs to ${CONFIG_FILE}:`, e.message);
   }
 }
 
-// Generate or load a random UUID once when the script starts
-let userID: string;
-
-if (envUUID && isValidUUID(envUUID)) {
-  userID = envUUID;
-  console.log(`Using UUID from environment: ${userID}`);
-} else {
-  const configUUID = await getUUIDFromConfig();
-  if (configUUID) {
-    userID = configUUID;
-  } else {
-    userID = crypto.randomUUID();
-    console.log(`Generated new UUID: ${userID}`);
-    await saveUUIDToConfig(userID);
-  }
-}
-
-if (!isValidUUID(userID)) {
-  throw new Error('uuid is not valid');
-}
+// Load UUIDs at startup
+await loadUUIDsFromConfig();
 
 console.log(Deno.version);
-console.log(`Final UUID in use: ${userID}`); // Log the final UUID for verification
+console.log(`Allowed UUIDs: ${Array.from(allowedUserIDs).join(', ')}`);
 
-// --- Main HTTP/WebSocket Server ---
+// --- Main HTTP/WebSocket Server (MODIFIED) ---
 
 Deno.serve(async (request: Request) => {
   const upgrade = request.headers.get('upgrade') || '';
+  const url = new URL(request.url);
+
   if (upgrade.toLowerCase() != 'websocket') {
-    const url = new URL(request.url);
+    // --- HTTP Request Handling ---
     switch (url.pathname) {
       case '/': {
         // New stylish front page content
@@ -237,7 +241,7 @@ Deno.serve(async (request: Request) => {
         <h1>🚀 Deno Proxy Online!</h1>
         <p>Your VLESS over WebSocket proxy is up and running. Enjoy secure and efficient connections.</p>
         <div class="button-container">
-            <a href="/${userID}" class="button">Get My VLESS Config</a>
+            <a href="/${Array.from(allowedUserIDs)[0]}" class="button">Get My VLESS Config (First UUID)</a>
         </div>
         <div class="footer">
             Powered by Deno. For support, contact <a href="https://t.me/modsbots_tech" target="_blank">@modsbots_tech</a>.
@@ -254,21 +258,30 @@ Deno.serve(async (request: Request) => {
         });
       }
       
-      case `/${userID}`: {
-        const hostName = url.hostname;
-        const port = url.port || (url.protocol === 'https:' ? 443 : 80);
-        const vlessMain = `vless://${userID}@${hostName}:${port}?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${credit}`;        
-        const ck = `vless://${userID}\u0040${hostName}:443?encryption=none%26security=tls%26sni=${hostName}%26fp=randomized%26type=ws%26host=${hostName}%26path=%2F%3Fed%3D2048%23${credit}`;
-        const urlString = `https://deno-proxy-version.deno.dev/?check=${ck}`;
-        await fetch(urlString); // This fetch is likely for reporting/analytics
+      default: {
+        // Handle /<UUID> paths for config pages
+        const pathUUID = url.pathname.substring(1);
+        let selectedUserID: string | undefined;
 
-        // Clash-Meta config block (formatted for display)
-        const clashMetaConfig = `
+        if (allowedUserIDs.has(pathUUID)) {
+            selectedUserID = pathUUID;
+        }
+
+        if (selectedUserID) {
+            const hostName = url.hostname;
+            const port = url.port || (url.protocol === 'https:' ? 443 : 80);
+            const vlessMain = `vless://${selectedUserID}@${hostName}:${port}?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${credit}`;        
+            const ck = `vless://${selectedUserID}\u0040${hostName}:443?encryption=none%26security=tls%26sni=${hostName}%26fp=randomized%26type=ws%26host=${hostName}%26path=%2F%3Fed%3D2048%23${credit}`;
+            const urlString = `https://deno-proxy-version.deno.dev/?check=${ck}`;
+            await fetch(urlString); // This fetch is likely for reporting/analytics
+
+            // Clash-Meta config block (formatted for display)
+            const clashMetaConfig = `
 - type: vless
   name: ${hostName}
   server: ${hostName}
   port: ${port}
-  uuid: ${userID}
+  uuid: ${selectedUserID}
   network: ws
   tls: true
   udp: false
@@ -280,7 +293,7 @@ Deno.serve(async (request: Request) => {
       host: ${hostName}
 `;
 
-        const htmlConfigContent = `
+            const htmlConfigContent = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -412,40 +425,56 @@ Deno.serve(async (request: Request) => {
     </div>
 </body>
 </html>
-`;
-        return new Response(htmlConfigContent, {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/html; charset=utf-8',
-          },
-        })
-      }
-      default:
-        return new Response('Not found', { status: 404 })
+            `;
+            return new Response(htmlConfigContent, {
+                status: 200,
+                headers: {
+                    'Content-Type': 'text/html; charset=utf-8',
+                },
+            });
+        }
+        return new Response('Not found', { status: 404 });
+      } // End default case for HTTP
     }
   } else {
-    return await vlessOverWSHandler(request)
+    // --- WebSocket Upgrade Path (MODIFIED HERE) ---
+    const { socket, response } = Deno.upgradeWebSocket(request);
+
+    // Add more "realistic" HTTP headers to the WebSocket upgrade response
+    response.headers.set('Server', 'nginx/1.22.1'); // Mimic a common web server
+    response.headers.set('X-Powered-By', 'Express'); // Mimic a common framework
+    response.headers.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    response.headers.set('Pragma', 'no-cache');
+    response.headers.set('Expires', '0');
+    response.headers.set('Content-Type', 'text/html; charset=utf-8'); // Common header for default response
+    response.headers.set('Connection', 'Upgrade'); // Already set by Deno.upgradeWebSocket but good to be explicit
+    response.headers.set('Upgrade', 'websocket'); // Already set by Deno.upgradeWebSocket
+
+    // Then, proceed with your existing WebSocket handling
+    return await vlessOverWSHandler(request, allowedUserIDs, { socket, response });
   }
-})
+});
 
-// --- VLESS over WebSocket Handler ---
-
-async function vlessOverWSHandler(request: Request) {
-  // websocket server
-  // https://docs.deno.com/runtime/manual/runtime/http_server_apis#serving-websockets
-  const { socket, response } = Deno.upgradeWebSocket(request)
-  let address = ''
-  let portWithRandomLog = ''
+// --- VLESS over WebSocket Handler (MODIFIED FUNCTION SIGNATURE) ---
+// Pass the socket and response object directly
+async function vlessOverWSHandler(
+  request: Request,
+  allowedUserIDs: Set<string>,
+  wsUpgradeResult: { socket: WebSocket; response: Response }
+) {
+  const { socket, response } = wsUpgradeResult; // Destructure the result here
+  let address = '';
+  let portWithRandomLog = '';
   const log = (info: string, event = '') => {
-    console.log(`[${address}:${portWithRandomLog}] ${info}`, event)
-  }
-  const earlyDataHeader = request.headers.get('sec-websocket-protocol') || ''
-  const readableWebSocketStream = makeReadableWebSocketStream(socket, earlyDataHeader, log)
+    console.log(`[${address}:${portWithRandomLog}] ${info}`, event);
+  };
+  const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+  const readableWebSocketStream = makeReadableWebSocketStream(socket, earlyDataHeader, log);
   let remoteSocketWapper: any = {
     value: null,
-  }
-  let udpStreamWrite: any = null
-  let isDns = false
+  };
+  let udpStreamWrite: any = null;
+  let isDns = false;
 
   // ws --> remote
   readableWebSocketStream
@@ -453,15 +482,16 @@ async function vlessOverWSHandler(request: Request) {
       new WritableStream({
         async write(chunk, controller) {
           if (isDns && udpStreamWrite) {
-            return udpStreamWrite(chunk)
+            return udpStreamWrite(chunk);
           }
           if (remoteSocketWapper.value) {
-            const writer = remoteSocketWapper.value.writable.getWriter()
-            await writer.write(new Uint8Array(chunk))
-            writer.releaseLock()
-            return
+            const writer = remoteSocketWapper.value.writable.getWriter();
+            await writer.write(new Uint8Array(chunk));
+            writer.releaseLock();
+            return;
           }
 
+          // Pass allowedUserIDs to processVlessHeader
           const {
             hasError,
             message,
@@ -470,36 +500,30 @@ async function vlessOverWSHandler(request: Request) {
             rawDataIndex,
             vlessVersion = new Uint8Array([0, 0]),
             isUDP,
-          } = processVlessHeader(chunk, userID) // Use the globally determined userID
-          address = addressRemote
-          portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '} `
+            userID_
+          } = processVlessHeader(chunk, allowedUserIDs); // <--- MODIFIED HERE
+
+          address = addressRemote;
+          portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '} `;
           if (hasError) {
-            // controller.error(message);
-            throw new Error(message) // cf seems has bug, controller.error will not end stream
-            // webSocket.close(1000, message);
-            return
+            throw new Error(message);
           }
-          // if UDP but port not DNS port, close it
           if (isUDP) {
             if (portRemote === 53) {
-              isDns = true
+              isDns = true;
             } else {
-              // controller.error('UDP proxy only enable for DNS which is port 53');
-              throw new Error('UDP proxy only enable for DNS which is port 53') // cf seems has bug, controller.error will not end stream
-              return
+              throw new Error('UDP proxy only enable for DNS which is port 53');
             }
           }
           
-          const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0])
-          const rawClientData = chunk.slice(rawDataIndex)
+          const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
+          const rawClientData = chunk.slice(rawDataIndex);
 
-          // TODO: support udp here when cf runtime has udp support
           if (isDns) {
-            console.log('isDns:', isDns)
-            const { write } = await handleUDPOutBound(socket, vlessResponseHeader, log)
-            udpStreamWrite = write
-            udpStreamWrite(rawClientData)
-            return
+            console.log('isDns:', isDns);
+            const { write } = await handleUDPOutBound(socket, vlessResponseHeader, log);
+            udpStreamWrite = write;
+            return;
           }
           handleTCPOutBound(
             remoteSocketWapper,
@@ -509,21 +533,21 @@ async function vlessOverWSHandler(request: Request) {
             socket,
             vlessResponseHeader,
             log
-          )
+          );
         },
         close() {
-          log(`readableWebSocketStream is close`)
+          log(`readableWebSocketStream is close`);
         },
         abort(reason) {
-          log(`readableWebSocketStream is abort`, JSON.stringify(reason))
+          log(`readableWebSocketStream is abort`, JSON.stringify(reason));
         },
       })
     )
     .catch((err) => {
-      log('readableWebSocketStream pipeTo error', err)
-    })
+      log('readableWebSocketStream pipeTo error', err);
+    });
 
-  return response
+  return response; // Return the response object (now with added headers)
 }
 
 /**
@@ -635,10 +659,10 @@ function makeReadableWebSocketStream(webSocketServer: WebSocket, earlyDataHeader
 
 /**
  * @param { ArrayBuffer} vlessBuffer
- * @param {string} userID
+ * @param {Set<string>} allowedUserIDs // MODIFIED PARAMETER
  * @returns
  */
-function processVlessHeader(vlessBuffer: ArrayBuffer, userID: string) {
+function processVlessHeader(vlessBuffer: ArrayBuffer, allowedUserIDs: Set<string>) { // MODIFIED PARAMETER
   if (vlessBuffer.byteLength < 24) {
     return {
       hasError: true,
@@ -646,19 +670,16 @@ function processVlessHeader(vlessBuffer: ArrayBuffer, userID: string) {
     };
   }
   const version = new Uint8Array(vlessBuffer.slice(0, 1));
-  let isValidUser = false;
-  let isUDP = false;
-  // Assuming stringify function is correctly converting UUID to string for comparison
-  if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
-    isValidUser = true;
-  }
-  if (!isValidUser) {
+  
+  // Check if the UUID from the client is in the allowedUserIDs set
+  const clientUUID = stringify(new Uint8Array(vlessBuffer.slice(1, 17)));
+  if (!allowedUserIDs.has(clientUUID)) { // MODIFIED CHECK
     return {
       hasError: true,
       message: 'invalid user',
     };
   }
-
+  
   const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
   //skip opt for now
 
@@ -733,6 +754,7 @@ function processVlessHeader(vlessBuffer: ArrayBuffer, userID: string) {
     rawDataIndex: addressValueIndex + addressLength,
     vlessVersion: version,
     isUDP,
+    userID_: clientUUID // Return the validated UUID
   };
 }
 
